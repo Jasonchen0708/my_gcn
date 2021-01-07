@@ -27,7 +27,7 @@ class TimeBlock(nn.Module):
     def forward(self, X):
         """
         :param X: Input data of shape (batch_size, num_nodes, num_timesteps, num_features=in_channels)
-        :return: Output data of shape (batch_size, num_nodes,num_timesteps_out, num_features_out=out_channels)
+        :return: Output data of shape (batch_size, num_nodes, num_timesteps_out, num_features_out=out_channels)
         """
         # Convert into NCHW format for pytorch to perform convolutions.
         X = X.permute(0, 3, 1, 2)
@@ -46,9 +46,9 @@ class BasicGcn(nn.Module):
         :param out_szie: output dim of node feature
         '''
         super(BasicGcn, self).__init__()
+        self.node_num = node_size
         self.weight = nn.Parameter(torch.FloatTensor(node_size, node_size))
         self.feature_weight = nn.Parameter(torch.FloatTensor(input_szie, out_szie))
-        self.A_norm = self.get_normalized_adj()
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -57,7 +57,7 @@ class BasicGcn(nn.Module):
         self.weight.data.uniform_(-stdv, stdv)
         self.feature_weight.data.uniform_(-stdv1, stdv1)
 
-    def get_normalized_adj(A):
+    def get_normalized_adj(self,A):
         """
         Returns the degree normalized adjacency matrix.
         """
@@ -70,10 +70,17 @@ class BasicGcn(nn.Module):
         return A_wave
 
     def forward(self, X, A):
-        A_hat = self.A_norm(A)
+        A_hat = self.get_normalized_adj(A)
         adj = self.weight*A_hat
-        feature = torch.mul(X,self.feature_weight)
-        out=torch.mm(adj,feature)
+        feature = torch.einsum("jkli,ij->jklj", [X, self.feature_weight])
+        # X size (batch_size, num_nodes, num_time_steps,input_feature_dim)
+        # feature = torch.mul(X, self.feature_weight)
+        # out=torch.mm(adj,feature)
+        out=torch.einsum("ij,jklm->kilm", [adj, feature.permute(1, 0, 2, 3)])
+        '''
+        feature_input size (num_nodes,batch_size, num_time_steps, output_feature_dim)
+        out size (batch_size,num_nodes,num_time_steps, output_feature_dim)
+        '''
         return F.relu(out), adj
 
 
@@ -127,10 +134,53 @@ class STGCNBlock(nn.Module):
         return self.batch_norm(t3), adj
 
 
+class STGCN(nn.Module):
+    """
+    Spatio-temporal graph convolutional network as described in
+    https://arxiv.org/abs/1709.04875v3 by Yu et al.
+    Input should have shape (batch_size, num_nodes, num_input_time_steps,
+    num_features).
+    """
+
+    def __init__(self, num_nodes, num_features, num_timesteps_input,
+                 num_timesteps_output):
+        """
+        :param num_nodes: Number of nodes in the graph.
+        :param num_features: Number of features at each node in each time step.
+        :param num_timesteps_input: Number of past time steps fed into the
+        network.
+        :param num_timesteps_output: Desired number of future time steps
+        output by the network.
+        """
+        super(STGCN, self).__init__()
+        self.block1 = STGCNBlock(in_channels=num_features, out_channels=64,
+                                 spatial_channels=16, num_nodes=num_nodes)
+        self.block2 = STGCNBlock(in_channels=64, out_channels=64,
+                                 spatial_channels=16, num_nodes=num_nodes)
+        self.last_temporal = TimeBlock(in_channels=64, out_channels=64)
+        self.fully = nn.Linear((num_timesteps_input - 2 * 5) * 64,
+                               num_timesteps_output)
+
+    def forward(self, A_hat, X):
+        """
+        :param X: Input data of shape (batch_size, num_nodes, num_timesteps,
+        num_features=in_channels).
+        :param A_hat: Normalized adjacency matrix.
+        """
+        out1 = self.block1(X, A_hat)
+        out2 = self.block2(out1, A_hat)
+        out3 = self.last_temporal(out2)
+        out4 = self.fully(out3.reshape((out3.shape[0], out3.shape[1], -1)))
+        return out4
+
+
 if __name__ == '__main__':
     A=np.eye(8)
-    model= BasicGcn(A, 3, 16)
-    for name, parameter in model.named_parameters():
+    # model= BasicGcn(A, 3, 16)
+    model2 = STGCN(9, 3, 15, 1)
+    for name, parameter in model2.named_parameters():
         print(name, ':', parameter.size())
+    parameters = sum(param.numel() for param in model2.parameters())
+    print('total parameter is {}'.format(parameters))
 
 
