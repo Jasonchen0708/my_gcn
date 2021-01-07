@@ -44,6 +44,10 @@ class BasicGcn(nn.Module):
         out=torch.mm(adj,feature)
         return F.relu(out), adj
 
+class LSTM(nn.Module):
+    def __init__(self):
+        super (LSTM, self).__init__()
+
 
 if __name__ == '__main__':
     A=np.eye(8)
